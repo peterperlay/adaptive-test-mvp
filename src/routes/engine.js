@@ -1,3 +1,4 @@
+import nodemailer from "nodemailer";
 import express from "express";
 import { getPool } from "../db.js";
 
@@ -503,6 +504,74 @@ router.post("/reset/:userId", async (req, res) => {
 
     res.status(500).json({
       error: "Reset failed",
+      details: err.message,
+    });
+  }
+});
+
+// -----------------------------------------------------
+// SEND RESULT EMAIL
+// -----------------------------------------------------
+router.post("/send-result", async (req, res) => {
+  try {
+    const { email, result } = req.body || {};
+
+    if (!email || !result) {
+      return res.status(400).json({
+        error: "Missing email or result",
+      });
+    }
+
+    const cefr = result?.user?.cefr || "N/A";
+    const theta = result?.user?.theta ?? "N/A";
+    const answeredCount = result?.answeredCount ?? "N/A";
+    const sem = result?.user?.sem ?? "N/A";
+
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 465),
+      secure: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    });
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM,
+      to: email,
+      subject: "Your BOOKR Adaptive Test Result",
+      html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+          <h1>Your English level result</h1>
+
+          <p>Thank you for completing the BOOKR Adaptive Placement Test.</p>
+
+          <div style="padding: 20px; background: #f5f3ff; border-radius: 16px;">
+            <h2 style="margin: 0;">Estimated CEFR level: ${cefr}</h2>
+          </div>
+
+          <p><strong>Answered questions:</strong> ${answeredCount}</p>
+          <p><strong>Ability score:</strong> ${theta}</p>
+          <p><strong>Standard error:</strong> ${sem}</p>
+
+          <p>
+            This result is an adaptive estimate based on your answers.
+          </p>
+
+          <p>BOOKR Team</p>
+        </div>
+      `,
+    });
+
+    res.json({
+      message: "Result email sent",
+    });
+  } catch (err) {
+    console.error("SEND RESULT EMAIL ERROR:", err);
+
+    res.status(500).json({
+      error: "Email sending failed",
       details: err.message,
     });
   }
