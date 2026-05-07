@@ -32,22 +32,24 @@ async function seed() {
         console.log(`Inserted ${count}/${questions.length}`);
       }
 
-      const questionResult = await db.query(
-        `
-        INSERT INTO questions (
-          text,
-          difficulty,
-          skill_tag
-        )
-        VALUES ($1, $2, $3)
-        RETURNING id
-        `,
-        [
-          q.text,
-          q.difficulty,
-          q.skill_tag,
-        ]
-      );
+const questionResult = await db.query(
+  `
+  INSERT INTO questions (
+    text,
+    question,
+    difficulty,
+    skill_tag
+  )
+  VALUES ($1, $2, $3, $4)
+  RETURNING id
+  `,
+  [
+    q.text,
+    q.question,
+    q.difficulty,
+    q.skill_tag,
+  ]
+);
 
       const questionId = questionResult.rows[0].id;
 

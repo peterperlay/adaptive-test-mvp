@@ -22,23 +22,20 @@ router.get("/init-db", async (req, res) => {
     const db = getPool();
 
     await db.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        email TEXT UNIQUE,
-        ability_score FLOAT DEFAULT 0,
-        cefr_estimate TEXT DEFAULT 'B1'
-      );
+      CREATE TABLE IF NOT EXISTS questions (
+  id SERIAL PRIMARY KEY,
+  text TEXT NOT NULL,
+  question TEXT NOT NULL,
+  difficulty FLOAT NOT NULL,
+  skill_tag TEXT,
+  correct_option_id INTEGER
+);
     `);
 
-    await db.query(`
-      CREATE TABLE IF NOT EXISTS questions (
-        id SERIAL PRIMARY KEY,
-        text TEXT NOT NULL,
-        difficulty FLOAT NOT NULL,
-        skill_tag TEXT,
-        correct_option_id INTEGER
-      );
-    `);
+await db.query(`
+  ALTER TABLE questions
+  ADD COLUMN IF NOT EXISTS question TEXT;
+`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS options (
@@ -106,23 +103,37 @@ router.get("/next-question/:userId", async (req, res) => {
 
     const user = userResult.rows[0];
 
-    const historyResult = await db.query(
-      `
-      SELECT
-        a.theta_after,
-        q.difficulty
-      FROM answers a
-      JOIN questions q
-        ON q.id = a.question_id
-      WHERE a.user_id = $1
-      ORDER BY a.created_at ASC
-      `,
-      [userId]
-    );
+const historyResult = await db.query(
+  `
+  SELECT
+    a.is_correct,
+    a.theta_before,
+    a.theta_after,
+    a.created_at,
+    q.difficulty
+  FROM answers a
+  JOIN questions q
+    ON q.id = a.question_id
+  WHERE a.user_id = $1
+  ORDER BY a.created_at ASC
+  `,
+  [userId]
+);
+
+
 
     const answers = historyResult.rows;
 
     const answeredCount = answers.length;
+const correctCount = answers.filter((a) => a.is_correct).length;
+
+const thetaHistory = answers.map((a, index) => ({
+  questionNumber: index + 1,
+  thetaBefore: Number(a.theta_before),
+  thetaAfter: Number(a.theta_after),
+  isCorrect: a.is_correct,
+}));
+
 
     const sem = standardError(
       user.ability_score,
@@ -189,6 +200,8 @@ router.get("/next-question/:userId", async (req, res) => {
       return res.json({
         finished: true,
         stopReason,
+        correctCount,
+        thetaHistory,        
         answeredCount,
 
         user: {
@@ -219,10 +232,14 @@ const questionsResult = await db.query(
     if (!questionsResult.rows.length) {
       return res.json({
         finished: true,
+   correctCount,
+        thetaHistory,
         stopReason:
           "No more questions available for this user",
 
         answeredCount,
+
+     
 
         user: {
           id: user.id,
@@ -251,12 +268,14 @@ const questionsResult = await db.query(
       [next.id]
     );
 
-    res.json({
-      finished: false,
+res.json({
+  finished: false,
 
-      answeredCount,
+  answeredCount,
+  correctCount,
+  thetaHistory,
 
-      user: {
+  user: {
         id: user.id,
         theta: user.ability_score,
         cefr: user.cefr_estimate,

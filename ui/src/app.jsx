@@ -47,7 +47,7 @@ export default function App() {
       }
     } catch (error) {
       console.error("START TEST ERROR:", error);
-      alert("Nem sikerült elindítani a tesztet. Ellenőrizd, hogy fut-e a backend.");
+      alert("Nem sikerült elindítani a tesztet.");
       setScreen("landing");
     } finally {
       setLoading(false);
@@ -77,6 +77,7 @@ export default function App() {
       await answerRes.json();
 
       const nextData = await getNextQuestion();
+      console.log("NEXT DATA AFTER ANSWER:", nextData);
 
       if (nextData.finished) {
         setResult(nextData);
@@ -164,6 +165,14 @@ export default function App() {
   function simulateResult() {
     setResult({
       answeredCount: 20,
+      correctCount: 14,
+      thetaHistory: [
+        { questionNumber: 1, thetaAfter: -0.2, isCorrect: true },
+        { questionNumber: 2, thetaAfter: 0.05, isCorrect: true },
+        { questionNumber: 3, thetaAfter: -0.1, isCorrect: false },
+        { questionNumber: 4, thetaAfter: 0.2, isCorrect: true },
+        { questionNumber: 5, thetaAfter: 0.42, isCorrect: true },
+      ],
       user: {
         cefr: "B1",
         theta: 0.42,
@@ -172,20 +181,10 @@ export default function App() {
       },
     });
 
-    if (!testStartedAt) {
-      setTestStartedAt(Date.now() - 9 * 60 * 1000);
-    }
-
+    setTestStartedAt(Date.now() - 9 * 60 * 1000);
     setTestFinishedAt(Date.now());
     setScreen("result");
   }
-
-  const theta = result?.user?.theta ?? 0;
-
-  const thetaMarkerPosition = Math.min(
-    100,
-    Math.max(0, ((theta + 3) / 6) * 100)
-  );
 
   const confidence =
     typeof result?.user?.sem === "number"
@@ -196,6 +195,74 @@ export default function App() {
     testStartedAt && testFinishedAt
       ? Math.max(1, Math.round((testFinishedAt - testStartedAt) / 60000))
       : null;
+
+  const thetaChartData = result?.thetaHistory?.length
+    ? result.thetaHistory
+    : [
+        { questionNumber: 1, thetaAfter: -0.4, isCorrect: true },
+        { questionNumber: 2, thetaAfter: -0.1, isCorrect: true },
+        { questionNumber: 3, thetaAfter: -0.25, isCorrect: false },
+        { questionNumber: 4, thetaAfter: 0.15, isCorrect: true },
+        { questionNumber: 5, thetaAfter: 0.42, isCorrect: true },
+      ];
+
+  const thetaValues = thetaChartData.map((p) => Number(p.thetaAfter));
+  const rawMinTheta = Math.min(...thetaValues);
+  const rawMaxTheta = Math.max(...thetaValues);
+  const padding = 0.2;
+  const minTheta = Math.floor((rawMinTheta - padding) * 10) / 10;
+  const maxTheta = Math.ceil((rawMaxTheta + padding) * 10) / 10;
+  const thetaRange = Math.max(0.5, maxTheta - minTheta);
+
+  const thetaPoints = thetaChartData.map((point, index) => {
+    const x =
+      thetaChartData.length <= 1
+        ? 40
+        : 40 + (index / (thetaChartData.length - 1)) * 420;
+
+    const y =
+      210 -
+      ((Number(point.thetaAfter) - minTheta) / thetaRange) * 160;
+
+    return {
+      ...point,
+      x,
+      y,
+    };
+  });
+
+  const thetaLinePoints = thetaPoints.map((p) => `${p.x},${p.y}`).join(" ");
+
+  const levelDescriptions = {
+    A1: {
+      title: "Kezdő szint",
+      text:
+        "Az A1 szintű nyelvhasználó egyszerű szavakat és alapvető kifejezéseket ért meg. Rövid, hétköznapi helyzetekben tud kommunikálni, például bemutatkozni vagy egyszerű kérdéseket megválaszolni.",
+    },
+    A2: {
+      title: "Alapfok",
+      text:
+        "Az A2 szintű nyelvhasználó már képes egyszerű beszélgetésekre ismerős témákban. Megérti a gyakran használt kifejezéseket és alapvető információkat.",
+    },
+    B1: {
+      title: "Középszint",
+      text:
+        "A B1 szintű nyelvhasználó önállóan boldogul sok hétköznapi helyzetben. Megérti a fontosabb információkat, képes véleményt megfogalmazni és egyszerűbb összefüggő szövegeket alkotni.",
+    },
+    B2: {
+      title: "Magabiztos középszint",
+      text:
+        "A B2 szintű nyelvhasználó összetettebb szövegeket is megért, és folyékonyabban kommunikál. Képes részletesen beszélni különböző témákról és érvelni a véleménye mellett.",
+    },
+    C1: {
+      title: "Haladó szint",
+      text:
+        "A C1 szintű nyelvhasználó magas szinten használja az angolt. Összetett szövegeket is könnyedén értelmez, és rugalmasan, választékosan kommunikál szakmai vagy akadémiai helyzetekben is.",
+    },
+  };
+
+  const currentCefr = result?.user?.cefr || "A2";
+  const currentLevel = levelDescriptions[currentCefr] || levelDescriptions.A2;
 
   return (
     <div className="app-shell">
@@ -301,27 +368,46 @@ export default function App() {
 
           <div className="score-card">
             <span>Becsült nyelvi szint</span>
-            <strong>{result?.user?.cefr || "A2"}</strong>
+            <strong>{currentCefr}</strong>
           </div>
 
           <p>A válaszaid alapján ez a becsült angol nyelvi szinted.</p>
 
           <button
-  className="details-toggle"
-  onClick={() => setShowDetails(!showDetails)}
->
-  <span>{showDetails ? "Kevesebb információ" : "Bővebb információ"}</span>
-  <span>{showDetails ? "↑" : "↓"}</span>
-</button>
+            className="details-toggle"
+            onClick={() => setShowDetails(!showDetails)}
+          >
+            <span>
+              {showDetails ? "Kevesebb információ" : "Bővebb információ"}
+            </span>
+            <span>{showDetails ? "↑" : "↓"}</span>
+          </button>
 
           {showDetails && (
             <div className="details-panel">
               <h2>Teljes kiértékelés</h2>
 
+              <div className="level-explanation-box">
+                <h3>
+                  {currentCefr} — {currentLevel.title}
+                </h3>
+
+                <p>{currentLevel.text}</p>
+              </div>
+
               <div className="metrics-grid">
                 <div className="metric-card">
                   <span>Kitöltött kérdések</span>
                   <strong>{result?.answeredCount || "N/A"}</strong>
+                </div>
+
+                <div className="metric-card">
+                  <span>Helyes válaszok</span>
+                  <strong>
+                    {typeof result?.correctCount === "number"
+                      ? `${result.correctCount}/${result.answeredCount}`
+                      : "N/A"}
+                  </strong>
                 </div>
 
                 <div className="metric-card">
@@ -335,7 +421,9 @@ export default function App() {
 
                 <div className="metric-card">
                   <span>Konfidencia</span>
-                  <strong>{confidence !== null ? `${confidence}%` : "N/A"}</strong>
+                  <strong>
+                    {confidence !== null ? `${confidence}%` : "N/A"}
+                  </strong>
                 </div>
 
                 <div className="metric-card">
@@ -346,8 +434,12 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="theta-chart">
+              <div className="level-strip-card">
                 <div className="theta-chart-header">
+                  <span>Jelenlegi becsült szint</span>
+                </div>
+
+                <div className="level-strip-labels">
                   <span>A1</span>
                   <span>A2</span>
                   <span>B1</span>
@@ -355,19 +447,149 @@ export default function App() {
                   <span>C1</span>
                 </div>
 
-                <div className="theta-track">
+                <div className="level-strip">
                   <div
-                    className="theta-marker"
+                    className="level-marker"
                     style={{
-                      left: `${thetaMarkerPosition}%`,
+                      left: `${Math.min(
+                        100,
+                        Math.max(
+                          0,
+                          (((result?.user?.theta ?? 0) + 3) / 6) * 100
+                        )
+                      )}%`,
                     }}
                   />
                 </div>
+              </div>
+
+              <div className="theta-chart">
+                <div className="theta-chart-header">
+                  <span>Theta változás a teszt során</span>
+                </div>
+
+                <svg className="theta-svg" viewBox="0 0 500 250">
+                  {Array.from({ length: 6 }, (_, i) => {
+                    const value = minTheta + (thetaRange / 5) * i;
+                    const y =
+                      210 -
+                      ((value - minTheta) / thetaRange) * 160;
+
+                    return (
+                      <g key={value.toFixed(1)}>
+                        <text
+                          x="16"
+                          y={y + 4}
+                          style={{
+                            fontFamily: "Nunito, Inter, sans-serif",
+                            fontSize: 12,
+                            fontWeight: 800,
+                            fill: "#667085",
+                          }}
+                        >
+                          {value.toFixed(1)}
+                        </text>
+
+                        <line
+                          x1="40"
+                          y1={y}
+                          x2="460"
+                          y2={y}
+                          className="theta-grid-line"
+                        />
+                      </g>
+                    );
+                  })}
+
+                  {thetaPoints.map((point, index) => (
+                    <text
+                      key={point.questionNumber}
+                      x={point.x}
+                      y="232"
+                      textAnchor="middle"
+                      style={{
+                        fontFamily: "Nunito, Inter, sans-serif",
+                        fontSize: 11,
+                        fontWeight: 800,
+                        fill: "#667085",
+                      }}
+                    >
+                      {index + 1}
+                    </text>
+                  ))}
+
+                  <line
+                    x1="40"
+                    y1="210"
+                    x2="460"
+                    y2="210"
+                    stroke="#d8d1ff"
+                    strokeWidth="3"
+                  />
+
+                  <line
+                    x1="40"
+                    y1="50"
+                    x2="40"
+                    y2="210"
+                    stroke="#d8d1ff"
+                    strokeWidth="3"
+                  />
+
+                  <polyline
+                    points={thetaLinePoints}
+                    fill="none"
+                    stroke="#6f3cff"
+                    strokeWidth="5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+
+                  {thetaPoints.map((point) => (
+                    <circle
+                      key={point.questionNumber}
+                      cx={point.x}
+                      cy={point.y}
+                      r="8"
+                      fill={point.isCorrect ? "#00d68f" : "#ff3ea5"}
+                      stroke="white"
+                      strokeWidth="4"
+                    />
+                  ))}
+
+                  <text
+                    x="250"
+                    y="248"
+                    textAnchor="middle"
+                    style={{
+                      fontFamily: "Nunito, Inter, sans-serif",
+                      fontSize: 13,
+                      fontWeight: 900,
+                      fill: "#18213f",
+                    }}
+                  >
+                    Kérdés száma
+                  </text>
+
+                  <text
+                    x="-130"
+                    y="-4"
+                    transform="rotate(-90)"
+                    textAnchor="middle"
+                    style={{
+                      fontFamily: "Nunito, Inter, sans-serif",
+                      fontSize: 13,
+                      fontWeight: 900,
+                      fill: "#18213f",
+                    }}
+                  >
+                    Theta érték
+                  </text>
+                </svg>
 
                 <p className="muted">
-                  A theta érték a rendszer becslése a tanuló aktuális nyelvi
-                  képességszintjére. Minél magasabb az érték, annál erősebb a
-                  becsült nyelvi teljesítmény.
+                  A grafikon azt mutatja, hogyan változott a becsült theta érték
+                  minden válaszadás után.
                 </p>
               </div>
 
