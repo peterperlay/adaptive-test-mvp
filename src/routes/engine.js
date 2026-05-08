@@ -14,6 +14,43 @@ import { estimateCEFR } from "../engine/cefr.js";
 
 const router = express.Router();
 
+async function getOrCreateSession(db, token) {
+  let sessionResult = await db.query(
+    `
+    SELECT *
+    FROM test_sessions
+    WHERE user_token = $1
+    `,
+    [token]
+  );
+
+  if (!sessionResult.rows.length) {
+    await db.query(
+      `
+      INSERT INTO test_sessions (
+        user_token,
+        current_theta,
+        cefr_estimate,
+        status
+      )
+      VALUES ($1, 0, 'B1', 'active')
+      `,
+      [token]
+    );
+
+    sessionResult = await db.query(
+      `
+      SELECT *
+      FROM test_sessions
+      WHERE user_token = $1
+      `,
+      [token]
+    );
+  }
+
+  return sessionResult.rows[0];
+}
+
 // -----------------------------------------------------
 // INIT DB
 // -----------------------------------------------------
@@ -23,19 +60,28 @@ router.get("/init-db", async (req, res) => {
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS questions (
-  id SERIAL PRIMARY KEY,
-  text TEXT NOT NULL,
-  question TEXT NOT NULL,
-  difficulty FLOAT NOT NULL,
-  skill_tag TEXT,
-  correct_option_id INTEGER
-);
+        id SERIAL PRIMARY KEY,
+        text TEXT NOT NULL,
+        question TEXT,
+        difficulty FLOAT NOT NULL,
+        skill_tag TEXT,
+        correct_option_id INTEGER
+      );
     `);
 
-await db.query(`
-  ALTER TABLE questions
-  ADD COLUMN IF NOT EXISTS question TEXT;
-`);
+    await db.query(`
+      ALTER TABLE questions
+      ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'multiple_choice',
+ADD COLUMN IF NOT EXISTS times_seen INTEGER DEFAULT 0,
+ADD COLUMN IF NOT EXISTS times_correct INTEGER DEFAULT 0,
+ADD COLUMN IF NOT EXISTS empirical_difficulty FLOAT DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS prompt TEXT,
+      ADD COLUMN IF NOT EXISTS passage TEXT,
+      ADD COLUMN IF NOT EXISTS image_url TEXT,
+      ADD COLUMN IF NOT EXISTS audio_url TEXT,
+      ADD COLUMN IF NOT EXISTS skill TEXT,
+      ADD COLUMN IF NOT EXISTS cefr_level TEXT;
+    `);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS options (
@@ -46,9 +92,22 @@ await db.query(`
     `);
 
     await db.query(`
+      CREATE TABLE IF NOT EXISTS test_sessions (
+        id SERIAL PRIMARY KEY,
+        user_token TEXT UNIQUE NOT NULL,
+        started_at TIMESTAMP DEFAULT NOW(),
+        finished_at TIMESTAMP,
+        current_theta FLOAT DEFAULT 0,
+        cefr_estimate TEXT DEFAULT 'B1',
+        status TEXT DEFAULT 'active'
+      );
+    `);
+
+    await db.query(`
       CREATE TABLE IF NOT EXISTS answers (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        user_id INTEGER,
+        session_id INTEGER REFERENCES test_sessions(id) ON DELETE CASCADE,
         question_id INTEGER REFERENCES questions(id) ON DELETE CASCADE,
         option_id INTEGER REFERENCES options(id) ON DELETE SET NULL,
         is_correct BOOLEAN NOT NULL,
@@ -57,6 +116,11 @@ await db.query(`
         cefr_after TEXT,
         created_at TIMESTAMP DEFAULT NOW()
       );
+    `);
+
+    await db.query(`
+      ALTER TABLE answers
+      ADD COLUMN IF NOT EXISTS session_id INTEGER REFERENCES test_sessions(id) ON DELETE CASCADE;
     `);
 
     res.json({ message: "DB initialized" });
@@ -73,95 +137,66 @@ await db.query(`
 // -----------------------------------------------------
 // GET NEXT QUESTION
 // -----------------------------------------------------
-router.get("/next-question/:userId", async (req, res) => {
+router.get("/next-question/:token", async (req, res) => {
   try {
     const db = getPool();
-    const userId = req.params.userId;
+    const token = req.params.token;
+
+    const session = await getOrCreateSession(db, token);
 
     const MIN_QUESTIONS = 20;
     const MAX_QUESTIONS = 35;
-
     const STABILITY_WINDOW = 5;
     const STABILITY_THRESHOLD = 0.05;
-
     const SEM_THRESHOLD = 0.35;
 
-    const userResult = await db.query(
+    const historyResult = await db.query(
       `
-      SELECT *
-      FROM users
-      WHERE id = $1
+    SELECT
+  a.is_correct,
+  a.theta_before,
+  a.theta_after,
+  a.created_at,
+  q.difficulty,
+  q.skill_tag,
+  q.skill
+FROM answers a
+JOIN questions q
+  ON q.id = a.question_id
+WHERE a.session_id = $1
+ORDER BY a.created_at ASC
       `,
-      [userId]
+      [session.id]
     );
-
-    if (!userResult.rows.length) {
-      return res.status(404).json({
-        error: "User not found",
-      });
-    }
-
-    const user = userResult.rows[0];
-
-const historyResult = await db.query(
-  `
-  SELECT
-    a.is_correct,
-    a.theta_before,
-    a.theta_after,
-    a.created_at,
-    q.difficulty
-  FROM answers a
-  JOIN questions q
-    ON q.id = a.question_id
-  WHERE a.user_id = $1
-  ORDER BY a.created_at ASC
-  `,
-  [userId]
-);
-
-
 
     const answers = historyResult.rows;
-
     const answeredCount = answers.length;
-const correctCount = answers.filter((a) => a.is_correct).length;
 
-const thetaHistory = answers.map((a, index) => ({
-  questionNumber: index + 1,
-  thetaBefore: Number(a.theta_before),
-  thetaAfter: Number(a.theta_after),
-  isCorrect: a.is_correct,
-}));
+    const correctCount = answers.filter((a) => a.is_correct).length;
 
+    const thetaHistory = answers.map((a, index) => ({
+      questionNumber: index + 1,
+      thetaBefore: Number(a.theta_before),
+      thetaAfter: Number(a.theta_after),
+      isCorrect: a.is_correct,
+    }));
 
-    const sem = standardError(
-      user.ability_score,
-      answers
-    );
-
-    const ci95 = confidenceInterval(
-      user.ability_score,
-      sem
-    );
+    const sem = standardError(session.current_theta, answers);
+    const ci95 = confidenceInterval(session.current_theta, sem);
 
     let shouldStop = false;
     let stopReason = null;
 
-    // max question stop
     if (answeredCount >= MAX_QUESTIONS) {
       shouldStop = true;
       stopReason = "Maximum question limit reached";
     }
 
-    // theta stabilization stop
     if (
       answeredCount >= MIN_QUESTIONS &&
       answers.length >= STABILITY_WINDOW + 1
     ) {
-      const recent = answers.slice(
-        -(STABILITY_WINDOW + 1)
-      );
+      const recent = answers.slice(-(STABILITY_WINDOW + 1));
 
       const deltas = [];
 
@@ -175,125 +210,135 @@ const thetaHistory = answers.map((a, index) => ({
       }
 
       const averageDelta =
-        deltas.reduce((sum, value) => sum + value, 0) /
-        deltas.length;
+        deltas.reduce((sum, value) => sum + value, 0) / deltas.length;
 
       if (averageDelta < STABILITY_THRESHOLD) {
         shouldStop = true;
-        stopReason =
-          `Theta stable over last ${STABILITY_WINDOW} answers`;
+        stopReason = `Theta stable over last ${STABILITY_WINDOW} answers`;
       }
     }
 
-    // SEM stop
     if (
       answeredCount >= MIN_QUESTIONS &&
       sem !== null &&
       sem <= SEM_THRESHOLD
     ) {
       shouldStop = true;
-      stopReason =
-        `Confidence threshold reached: SEM ${sem.toFixed(2)}`;
+      stopReason = `Confidence threshold reached: SEM ${sem.toFixed(2)}`;
     }
 
     if (shouldStop) {
+      await db.query(
+        `
+        UPDATE test_sessions
+        SET status = 'finished',
+            finished_at = COALESCE(finished_at, NOW())
+        WHERE id = $1
+        `,
+        [session.id]
+      );
+
       return res.json({
         finished: true,
         stopReason,
-        correctCount,
-        thetaHistory,        
         answeredCount,
-
+        correctCount,
+        thetaHistory,
         user: {
-          id: user.id,
-          theta: user.ability_score,
-          cefr: user.cefr_estimate,
+          id: session.id,
+          theta: session.current_theta,
+          cefr: session.cefr_estimate,
           sem,
           ci95,
         },
-
         nextQuestion: null,
       });
     }
 
-const questionsResult = await db.query(
-  `
-  SELECT q.*
-  FROM questions q
-  LEFT JOIN answers a
-    ON a.question_id = q.id
-   AND a.user_id = $1
-  WHERE a.id IS NULL
-  ORDER BY q.id ASC
-  `,
-  [userId]
-);
+    const questionsResult = await db.query(
+      `
+      SELECT q.*
+      FROM questions q
+      LEFT JOIN answers a
+        ON a.question_id = q.id
+       AND a.session_id = $1
+      WHERE a.id IS NULL
+      ORDER BY q.id ASC
+      `,
+      [session.id]
+    );
 
     if (!questionsResult.rows.length) {
+      await db.query(
+        `
+        UPDATE test_sessions
+        SET status = 'finished',
+            finished_at = COALESCE(finished_at, NOW())
+        WHERE id = $1
+        `,
+        [session.id]
+      );
+
       return res.json({
         finished: true,
-   correctCount,
-        thetaHistory,
-        stopReason:
-          "No more questions available for this user",
-
+        stopReason: "No more questions available for this session",
         answeredCount,
-
-     
-
+        correctCount,
+        thetaHistory,
         user: {
-          id: user.id,
-          theta: user.ability_score,
-          cefr: user.cefr_estimate,
+          id: session.id,
+          theta: session.current_theta,
+          cefr: session.cefr_estimate,
           sem,
           ci95,
         },
-
         nextQuestion: null,
       });
     }
 
-    const next = selectNextQuestion(
-      questionsResult.rows,
-      user.ability_score
-    );
+const answeredSkillCounts = {};
 
-    const optionsResult = await db.query(
-      `
-      SELECT id, text
-      FROM options
-      WHERE question_id = $1
-      ORDER BY id
-      `,
-      [next.id]
-    );
+for (const answer of answers) {
+  const skill = answer.skill_tag || answer.skill || "general";
+  answeredSkillCounts[skill] =
+    (answeredSkillCounts[skill] || 0) + 1;
+}
 
-res.json({
-  finished: false,
+const next = selectNextQuestion(
+  questionsResult.rows,
+  session.current_theta,
+  answeredSkillCounts
+);
 
-  answeredCount,
-  correctCount,
-  thetaHistory,
+const optionsResult = await db.query(
+  `
+  SELECT id, text
+  FROM options
+  WHERE question_id = $1
+  ORDER BY RANDOM()
+  `,
+  [next.id]
+);
 
-  user: {
-        id: user.id,
-        theta: user.ability_score,
-        cefr: user.cefr_estimate,
+    res.json({
+      finished: false,
+      answeredCount,
+      correctCount,
+      thetaHistory,
+      user: {
+        id: session.id,
+        theta: session.current_theta,
+        cefr: session.cefr_estimate,
         sem,
         ci95,
       },
-
       nextQuestion: {
         ...next,
         options: optionsResult.rows,
       },
     });
-
   } catch (err) {
-    console.error(
-      "ENGINE NEXT QUESTION ERROR:",
-      err
-    );
+    console.error("ENGINE NEXT QUESTION ERROR:", err);
 
     res.status(500).json({
       error: "Server error",
@@ -307,13 +352,9 @@ res.json({
 // -----------------------------------------------------
 router.post("/answer", async (req, res) => {
   try {
-    const {
-      userId,
-      questionId,
-      optionId,
-    } = req.body || {};
+    const { sessionToken, questionId, optionId } = req.body || {};
 
-    if (!userId || !questionId || !optionId) {
+    if (!sessionToken || !questionId || !optionId) {
       return res.status(400).json({
         error: "Missing required fields",
       });
@@ -321,14 +362,7 @@ router.post("/answer", async (req, res) => {
 
     const db = getPool();
 
-    const userResult = await db.query(
-      `
-      SELECT *
-      FROM users
-      WHERE id = $1
-      `,
-      [userId]
-    );
+    const session = await getOrCreateSession(db, sessionToken);
 
     const questionResult = await db.query(
       `
@@ -339,40 +373,35 @@ router.post("/answer", async (req, res) => {
       [questionId]
     );
 
-    if (
-      !userResult.rows.length ||
-      !questionResult.rows.length
-    ) {
+    if (!questionResult.rows.length) {
       return res.status(404).json({
-        error: "User or question not found",
+        error: "Question not found",
       });
     }
 
-    const user = userResult.rows[0];
     const question = questionResult.rows[0];
 
-const alreadyAnswered = await db.query(
-  `
-  SELECT id
-  FROM answers
-  WHERE user_id = $1
-    AND question_id = $2
-  LIMIT 1
-  `,
-  [userId, questionId]
-);
+    const alreadyAnswered = await db.query(
+      `
+      SELECT id
+      FROM answers
+      WHERE session_id = $1
+        AND question_id = $2
+      LIMIT 1
+      `,
+      [session.id, questionId]
+    );
 
-if (alreadyAnswered.rows.length) {
-  return res.status(409).json({
-    error: "Question already answered by this user",
-  });
-}
+    if (alreadyAnswered.rows.length) {
+      return res.status(409).json({
+        error: "Question already answered in this session",
+      });
+    }
 
-    const thetaBefore = user.ability_score;
+    const thetaBefore = session.current_theta;
 
     const isCorrect =
-      Number(optionId) ===
-      Number(question.correct_option_id);
+      Number(optionId) === Number(question.correct_option_id);
 
     const newTheta = updateTheta(
       thetaBefore,
@@ -384,22 +413,18 @@ if (alreadyAnswered.rows.length) {
 
     await db.query(
       `
-      UPDATE users
-      SET ability_score = $1,
+      UPDATE test_sessions
+      SET current_theta = $1,
           cefr_estimate = $2
       WHERE id = $3
       `,
-      [
-        newTheta,
-        newCefr,
-        userId,
-      ]
+      [newTheta, newCefr, session.id]
     );
 
     await db.query(
       `
       INSERT INTO answers (
-        user_id,
+        session_id,
         question_id,
         option_id,
         is_correct,
@@ -410,7 +435,7 @@ if (alreadyAnswered.rows.length) {
       VALUES ($1,$2,$3,$4,$5,$6,$7)
       `,
       [
-        userId,
+        session.id,
         questionId,
         optionId,
         isCorrect,
@@ -419,63 +444,65 @@ if (alreadyAnswered.rows.length) {
         newCefr,
       ]
     );
+await db.query(
+  `
+  UPDATE questions
+  SET
+    times_seen = times_seen + 1,
+    times_correct = times_correct + $1
+  WHERE id = $2
+  `,
+  [
+    isCorrect ? 1 : 0,
+    questionId,
+  ]
+);
 
+await db.query(
+  `
+  UPDATE questions
+  SET empirical_difficulty =
+    CASE
+      WHEN times_seen = 0 THEN 0
+      ELSE 1 - (times_correct::float / times_seen)
+    END
+  WHERE id = $1
+  `,
+  [questionId]
+);
     const answeredItemsResult = await db.query(
       `
       SELECT q.difficulty
       FROM answers a
       JOIN questions q
         ON q.id = a.question_id
-      WHERE a.user_id = $1
+      WHERE a.session_id = $1
       `,
-      [userId]
+      [session.id]
     );
 
-    const sem = standardError(
-      newTheta,
-      answeredItemsResult.rows
-    );
+    const sem = standardError(newTheta, answeredItemsResult.rows);
+    const ci95 = confidenceInterval(newTheta, sem);
 
-    const ci95 = confidenceInterval(
-      newTheta,
-      sem
-    );
-
-    const p = probabilityCorrect(
-      newTheta,
-      question.difficulty
-    );
+    const p = probabilityCorrect(newTheta, question.difficulty);
 
     res.json({
-      userId,
+      sessionId: session.id,
       questionId,
-
       selectedOptionId: optionId,
-
       isCorrect,
-
       thetaBefore,
-
       theta: newTheta,
-
       cefr: newCefr,
-
       sem,
-
       ci95,
-
       debug: {
         pCorrect: p,
-        correctOptionId:
-          question.correct_option_id,
+        correctOptionId: question.correct_option_id,
       },
     });
-
   } catch (err) {
-    console.error(
-      "ENGINE ANSWER ERROR:",
-      err
-    );
+    console.error("ENGINE ANSWER ERROR:", err);
 
     res.status(500).json({
       error: "Server error",
@@ -485,41 +512,41 @@ if (alreadyAnswered.rows.length) {
 });
 
 // -----------------------------------------------------
-// RESET USER TEST
+// RESET SESSION TEST
 // -----------------------------------------------------
-router.post("/reset/:userId", async (req, res) => {
+router.post("/reset/:token", async (req, res) => {
   try {
     const db = getPool();
+    const token = req.params.token;
 
-    const userId = req.params.userId;
+    const session = await getOrCreateSession(db, token);
 
     await db.query(
       `
       DELETE FROM answers
-      WHERE user_id = $1
+      WHERE session_id = $1
       `,
-      [userId]
+      [session.id]
     );
 
     await db.query(
       `
-      UPDATE users
-      SET ability_score = 0,
-          cefr_estimate = 'B1'
+      UPDATE test_sessions
+      SET current_theta = 0,
+          cefr_estimate = 'B1',
+          status = 'active',
+          started_at = NOW(),
+          finished_at = NULL
       WHERE id = $1
       `,
-      [userId]
+      [session.id]
     );
 
     res.json({
-      message: "User reset successful",
+      message: "Session reset successful",
     });
-
   } catch (err) {
-    console.error(
-      "RESET ERROR:",
-      err
-    );
+    console.error("RESET ERROR:", err);
 
     res.status(500).json({
       error: "Reset failed",

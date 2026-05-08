@@ -785,3 +785,41 @@ button:disabled {
 
   color: #667085;
 }
+
+.question-image {
+  width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+
+  border-radius: 20px;
+
+  margin-bottom: 18px;
+
+  border: 2px solid #ece7ff;
+
+  background: white;
+}
+
+.question-audio {
+  width: 100%;
+
+  margin-bottom: 18px;
+}
+
+.reading-passage {
+  background: #fbfaff;
+
+  border: 2px solid #ece7ff;
+
+  border-radius: 20px;
+
+  padding: 20px;
+
+  margin-bottom: 18px;
+
+  color: #18213f;
+
+  line-height: 1.7;
+
+  font-size: 17px;
+}

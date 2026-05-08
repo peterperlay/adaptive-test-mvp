@@ -4,7 +4,23 @@ import "./App.css";
 const API = "http://localhost:3000";
 
 export default function App() {
-  const userId = 1;
+
+function getSessionToken() {
+  let token = localStorage.getItem("adaptiveTestToken");
+
+  if (!token) {
+    token = crypto.randomUUID();
+
+    localStorage.setItem(
+      "adaptiveTestToken",
+      token
+    );
+  }
+
+  return token;
+}
+
+const sessionToken = getSessionToken();
 
   const [screen, setScreen] = useState("landing");
   const [question, setQuestion] = useState(null);
@@ -17,7 +33,7 @@ export default function App() {
   const [testFinishedAt, setTestFinishedAt] = useState(null);
 
   async function getNextQuestion() {
-    const res = await fetch(`${API}/engine/next-question/${userId}`);
+    const res = await fetch(`${API}/engine/next-question/${sessionToken}`);
 
     if (!res.ok) {
       throw new Error(`Next question API error: ${res.status}`);
@@ -64,7 +80,7 @@ export default function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          userId,
+          sessionToken,
           questionId: question.id,
           optionId,
         }),
@@ -99,9 +115,9 @@ export default function App() {
     try {
       setLoading(true);
 
-      const res = await fetch(`${API}/engine/reset/${userId}`, {
-        method: "POST",
-      });
+ const res = await fetch(`${API}/engine/reset/${sessionToken}`, {
+  method: "POST",
+});
 
       if (!res.ok) {
         throw new Error(`Reset API error: ${res.status}`);
@@ -310,7 +326,6 @@ export default function App() {
           <div className="test-header">
             <div>
               <div className="badge">Adaptív teszt</div>
-              <h2>Válaszd ki a legjobb választ</h2>
             </div>
 
             <div className="header-actions">
@@ -336,9 +351,42 @@ export default function App() {
 
           {!loading && question && (
             <>
-              <div className="question-box">
-                <p>{question.text}</p>
-              </div>
+           <div className="question-box">
+
+  {question.prompt && (
+    <span className="question-instruction">
+      {question.prompt}
+    </span>
+  )}
+
+  {question.passage && (
+    <div className="reading-passage">
+      {question.passage}
+    </div>
+  )}
+
+  {question.image_url && (
+    <img
+      src={question.image_url}
+      alt="Question visual"
+      className="question-image"
+    />
+  )}
+
+  {question.audio_url && (
+    <audio
+      controls
+      className="question-audio"
+    >
+      <source
+        src={question.audio_url}
+        type="audio/ogg"
+      />
+    </audio>
+  )}
+
+  <p>{question.text}</p>
+</div>
 
               <div className="options">
                 {question.options?.map((option) => (

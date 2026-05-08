@@ -8,6 +8,14 @@ const questions = JSON.parse(
   fs.readFileSync("./cefr_450_questions.json", "utf8")
 );
 
+function cleanQuestionText(text) {
+  return String(text || "")
+    .replace(/^Choose the correct word:\s*/i, "")
+    .replace(/^Which option is correct\?\s*/i, "")
+    .replace(/^Choose the correct answer:\s*/i, "")
+    .trim();
+}
+
 async function seed() {
   try {
     console.log(`Seeding ${questions.length} questions...`);
@@ -32,24 +40,26 @@ async function seed() {
         console.log(`Inserted ${count}/${questions.length}`);
       }
 
-const questionResult = await db.query(
-  `
-  INSERT INTO questions (
-    text,
-    question,
-    difficulty,
-    skill_tag
-  )
-  VALUES ($1, $2, $3, $4)
-  RETURNING id
-  `,
-  [
-    q.text,
-    q.question,
-    q.difficulty,
-    q.skill_tag,
-  ]
-);
+      const questionText = cleanQuestionText(q.text);
+
+      const questionResult = await db.query(
+        `
+        INSERT INTO questions (
+          text,
+          question,
+          difficulty,
+          skill_tag
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        `,
+        [
+          questionText,
+          q.question,
+          q.difficulty,
+          q.skill_tag,
+        ]
+      );
 
       const questionId = questionResult.rows[0].id;
 
@@ -94,7 +104,6 @@ const questionResult = await db.query(
     console.log("Seed completed successfully.");
 
     process.exit(0);
-
   } catch (err) {
     await db.query("ROLLBACK");
 
