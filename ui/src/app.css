@@ -823,3 +823,90 @@ button:disabled {
 
   font-size: 17px;
 }
+.audio-control-wrapper {
+  display: flex;
+  justify-content: center;
+  margin: 22px 0;
+}
+
+.audio-circle-button {
+  width: 78px;
+  height: 78px;
+  border: none;
+  border-radius: 50%;
+  padding: 5px;
+  cursor: pointer;
+  box-shadow: 0 16px 34px rgba(111, 60, 255, 0.28);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.audio-circle-button:hover {
+  transform: translateY(-2px) scale(1.03);
+  box-shadow: 0 20px 42px rgba(111, 60, 255, 0.34);
+}
+
+.audio-circle-button:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.audio-inner-circle {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #6f3cff, #ff3ea5);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: Nunito, Inter, sans-serif;
+  font-size: 24px;
+  font-weight: 900;
+  line-height: 1;
+}
+.test-banner {
+  width: 100%;
+  margin-bottom: 28px;
+  padding: 22px 28px;
+
+  border-radius: 24px;
+
+  background:
+    linear-gradient(
+      135deg,
+      #6f3cff 0%,
+      #8f56ff 45%,
+      #ff3ea5 100%
+    );
+
+  color: white;
+
+  font-family: Nunito, Inter, sans-serif;
+  font-size: 32px;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+
+  display: flex;
+  align-items: center;
+
+  box-shadow:
+    0 20px 40px rgba(111, 60, 255, 0.24);
+  
+  }
+.question-counter {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin: -12px 0 24px;
+  padding: 14px 18px;
+  border-radius: 18px;
+  background: #f5f3ff;
+  color: #18213f;
+  font-family: Nunito, Inter, sans-serif;
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.question-counter strong {
+  color: #6f3cff;
+  font-size: 18px;
+}

@@ -1,5 +1,8 @@
+import crypto from "crypto";
 import nodemailer from "nodemailer";
 import express from "express";
+import fs from "fs";
+import path from "path";
 import { getPool } from "../db.js";
 
 import {
@@ -13,6 +16,41 @@ import { selectNextQuestion } from "../engine/select.js";
 import { estimateCEFR } from "../engine/cefr.js";
 
 const router = express.Router();
+
+const LOG_DIR = path.join(process.cwd(), "logs");
+
+function ensureLogDir() {
+  if (!fs.existsSync(LOG_DIR)) {
+    fs.mkdirSync(LOG_DIR, { recursive: true });
+  }
+}
+
+function safeToken(token) {
+  return String(token || "unknown").replace(/[^a-zA-Z0-9-_]/g, "_");
+}
+
+function generatePublicId(prefix) {
+  return `${prefix}_${crypto.randomBytes(6).toString("hex")}`;
+}
+
+function writeSessionLog(token, event, data = {}) {
+  ensureLogDir();
+
+  const date = new Date().toISOString().slice(0, 10);
+
+  const filepath = path.join(
+  LOG_DIR,
+  `${date}-session-${safeToken(token)}.log`
+  );
+
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    event,
+    ...data,
+  };
+
+  fs.appendFileSync(filepath, JSON.stringify(logEntry) + "\n", "utf8");
+}
 
 async function getOrCreateSession(db, token) {
   let sessionResult = await db.query(
@@ -29,14 +67,21 @@ async function getOrCreateSession(db, token) {
       `
       INSERT INTO test_sessions (
         user_token,
+        public_session_id,
+        public_user_id,
         current_theta,
         cefr_estimate,
         status
       )
-      VALUES ($1, 0, 'B1', 'active')
+      VALUES ($1,$2,$3,0,'B1','active')
       `,
-      [token]
+      [token,
+      generatePublicId("sess"),
+      generatePublicId("user"),
+      ]
     );
+
+    writeSessionLog(token, "session_created");
 
     sessionResult = await db.query(
       `
@@ -69,19 +114,16 @@ router.get("/init-db", async (req, res) => {
       );
     `);
 
-    await db.query(`
-      ALTER TABLE questions
-      ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'multiple_choice',
-ADD COLUMN IF NOT EXISTS times_seen INTEGER DEFAULT 0,
-ADD COLUMN IF NOT EXISTS times_correct INTEGER DEFAULT 0,
-ADD COLUMN IF NOT EXISTS empirical_difficulty FLOAT DEFAULT 0,
-      ADD COLUMN IF NOT EXISTS prompt TEXT,
-      ADD COLUMN IF NOT EXISTS passage TEXT,
-      ADD COLUMN IF NOT EXISTS image_url TEXT,
-      ADD COLUMN IF NOT EXISTS audio_url TEXT,
-      ADD COLUMN IF NOT EXISTS skill TEXT,
-      ADD COLUMN IF NOT EXISTS cefr_level TEXT;
-    `);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'multiple_choice';`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS times_seen INTEGER DEFAULT 0;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS times_correct INTEGER DEFAULT 0;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS empirical_difficulty FLOAT DEFAULT 0;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS prompt TEXT;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS passage TEXT;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS image_url TEXT;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS audio_url TEXT;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS skill TEXT;`);
+    await db.query(`ALTER TABLE questions ADD COLUMN IF NOT EXISTS cefr_level TEXT;`);
 
     await db.query(`
       CREATE TABLE IF NOT EXISTS options (
@@ -152,26 +194,25 @@ router.get("/next-question/:token", async (req, res) => {
 
     const historyResult = await db.query(
       `
-    SELECT
-  a.is_correct,
-  a.theta_before,
-  a.theta_after,
-  a.created_at,
-  q.difficulty,
-  q.skill_tag,
-  q.skill
-FROM answers a
-JOIN questions q
-  ON q.id = a.question_id
-WHERE a.session_id = $1
-ORDER BY a.created_at ASC
+      SELECT
+        a.is_correct,
+        a.theta_before,
+        a.theta_after,
+        a.created_at,
+        q.difficulty,
+        q.skill_tag,
+        q.skill
+      FROM answers a
+      JOIN questions q
+        ON q.id = a.question_id
+      WHERE a.session_id = $1
+      ORDER BY a.created_at ASC
       `,
       [session.id]
     );
 
     const answers = historyResult.rows;
     const answeredCount = answers.length;
-
     const correctCount = answers.filter((a) => a.is_correct).length;
 
     const thetaHistory = answers.map((a, index) => ({
@@ -238,14 +279,27 @@ ORDER BY a.created_at ASC
         [session.id]
       );
 
+      writeSessionLog(token, "test_finished", {
+        sessionId: session.id,
+        stopReason,
+        answeredCount,
+        correctCount,
+        theta: session.current_theta,
+        cefr: session.cefr_estimate,
+        sem,
+        ci95,
+      });
+
       return res.json({
         finished: true,
         stopReason,
         answeredCount,
         correctCount,
         thetaHistory,
+        sessionId: session.public_session_id,
+
         user: {
-          id: session.id,
+          id: session.public_user_id,
           theta: session.current_theta,
           cefr: session.cefr_estimate,
           sem,
@@ -263,7 +317,7 @@ ORDER BY a.created_at ASC
         ON a.question_id = q.id
        AND a.session_id = $1
       WHERE a.id IS NULL
-      ORDER BY q.id ASC
+      ORDER BY RANDOM()
       `,
       [session.id]
     );
@@ -279,14 +333,27 @@ ORDER BY a.created_at ASC
         [session.id]
       );
 
+      writeSessionLog(token, "test_finished", {
+        sessionId: session.id,
+        stopReason: "No more questions available for this session",
+        answeredCount,
+        correctCount,
+        theta: session.current_theta,
+        cefr: session.cefr_estimate,
+        sem,
+        ci95,
+      });
+
       return res.json({
         finished: true,
         stopReason: "No more questions available for this session",
         answeredCount,
         correctCount,
         thetaHistory,
+        sessionId: session.public_session_id,
+
         user: {
-          id: session.id,
+          id: session.public_user_id,
           theta: session.current_theta,
           cefr: session.cefr_estimate,
           sem,
@@ -296,37 +363,49 @@ ORDER BY a.created_at ASC
       });
     }
 
-const answeredSkillCounts = {};
+    const answeredSkillCounts = {};
 
-for (const answer of answers) {
-  const skill = answer.skill_tag || answer.skill || "general";
-  answeredSkillCounts[skill] =
-    (answeredSkillCounts[skill] || 0) + 1;
-}
+    for (const answer of answers) {
+      const skill = answer.skill_tag || answer.skill || "general";
+      answeredSkillCounts[skill] = (answeredSkillCounts[skill] || 0) + 1;
+    }
 
-const next = selectNextQuestion(
-  questionsResult.rows,
-  session.current_theta,
-  answeredSkillCounts
-);
+    const next = selectNextQuestion(
+      questionsResult.rows,
+      session.current_theta,
+      answeredSkillCounts
+    );
 
-const optionsResult = await db.query(
-  `
-  SELECT id, text
-  FROM options
-  WHERE question_id = $1
-  ORDER BY RANDOM()
-  `,
-  [next.id]
-);
+    const optionsResult = await db.query(
+      `
+      SELECT id, text
+      FROM options
+      WHERE question_id = $1
+      ORDER BY RANDOM()
+      `,
+      [next.id]
+    );
+
+    writeSessionLog(token, "next_question", {
+      sessionId: session.id,
+      answeredCount,
+      theta: session.current_theta,
+      cefr: session.cefr_estimate,
+      questionId: next.id,
+      difficulty: next.difficulty,
+      skill: next.skill_tag || next.skill,
+      type: next.type,
+    });
 
     res.json({
       finished: false,
       answeredCount,
       correctCount,
       thetaHistory,
+      sessionId: session.public_session_id,
+
       user: {
-        id: session.id,
+        id: session.public_user_id,
         theta: session.current_theta,
         cefr: session.cefr_estimate,
         sem,
@@ -364,6 +443,12 @@ router.post("/answer", async (req, res) => {
 
     const session = await getOrCreateSession(db, sessionToken);
 
+    if (session.status === "finished") {
+      return res.status(409).json({
+        error: "Session already finished",
+      });
+    }
+
     const questionResult = await db.query(
       `
       SELECT *
@@ -380,6 +465,22 @@ router.post("/answer", async (req, res) => {
     }
 
     const question = questionResult.rows[0];
+
+    const optionCheck = await db.query(
+      `
+      SELECT id
+      FROM options
+      WHERE id = $1
+        AND question_id = $2
+      `,
+      [optionId, questionId]
+    );
+
+    if (!optionCheck.rows.length) {
+      return res.status(400).json({
+        error: "Selected option does not belong to this question",
+      });
+    }
 
     const alreadyAnswered = await db.query(
       `
@@ -398,16 +499,22 @@ router.post("/answer", async (req, res) => {
       });
     }
 
-    const thetaBefore = session.current_theta;
+    const thetaBefore = Number(session.current_theta);
 
     const isCorrect =
       Number(optionId) === Number(question.correct_option_id);
 
     const newTheta = updateTheta(
       thetaBefore,
-      question.difficulty,
+      Number(question.difficulty),
       isCorrect
     );
+
+    if (Number.isNaN(newTheta)) {
+      return res.status(500).json({
+        error: "Theta calculation failed",
+      });
+    }
 
     const newCefr = estimateCEFR(newTheta);
 
@@ -444,32 +551,31 @@ router.post("/answer", async (req, res) => {
         newCefr,
       ]
     );
-await db.query(
-  `
-  UPDATE questions
-  SET
-    times_seen = times_seen + 1,
-    times_correct = times_correct + $1
-  WHERE id = $2
-  `,
-  [
-    isCorrect ? 1 : 0,
-    questionId,
-  ]
-);
 
-await db.query(
-  `
-  UPDATE questions
-  SET empirical_difficulty =
-    CASE
-      WHEN times_seen = 0 THEN 0
-      ELSE 1 - (times_correct::float / times_seen)
-    END
-  WHERE id = $1
-  `,
-  [questionId]
-);
+    await db.query(
+      `
+      UPDATE questions
+      SET
+        times_seen = times_seen + 1,
+        times_correct = times_correct + $1
+      WHERE id = $2
+      `,
+      [isCorrect ? 1 : 0, questionId]
+    );
+
+    await db.query(
+      `
+      UPDATE questions
+      SET empirical_difficulty =
+        CASE
+          WHEN times_seen = 0 THEN 0
+          ELSE 1 - (times_correct::float / times_seen)
+        END
+      WHERE id = $1
+      `,
+      [questionId]
+    );
+
     const answeredItemsResult = await db.query(
       `
       SELECT q.difficulty
@@ -484,7 +590,23 @@ await db.query(
     const sem = standardError(newTheta, answeredItemsResult.rows);
     const ci95 = confidenceInterval(newTheta, sem);
 
-    const p = probabilityCorrect(newTheta, question.difficulty);
+    const p = probabilityCorrect(newTheta, Number(question.difficulty));
+
+    writeSessionLog(sessionToken, "answer_submitted", {
+      sessionId: session.id,
+      publicSessionId: session.public_session_id,
+      publicUserId: session.public_user_id,
+      questionId,
+      selectedOptionId: optionId,
+      correctOptionId: question.correct_option_id,
+      isCorrect,
+      thetaBefore,
+      thetaAfter: newTheta,
+      cefrAfter: newCefr,
+      difficulty: question.difficulty,
+      skill: question.skill_tag || question.skill,
+      type: question.type,
+    });
 
     res.json({
       sessionId: session.id,
@@ -541,6 +663,10 @@ router.post("/reset/:token", async (req, res) => {
       `,
       [session.id]
     );
+
+    writeSessionLog(token, "session_reset", {
+      sessionId: session.id,
+    });
 
     res.json({
       message: "Session reset successful",

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import "./App.css";
 
 const API = "http://localhost:3000";
@@ -27,7 +27,11 @@ const sessionToken = getSessionToken();
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState("");
-
+  const audioRef = useRef(null);
+  const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [audioProgress, setAudioProgress] = useState(0);
+  const [answeredCount, setAnsweredCount] = useState(0);
+  const APPROX_TOTAL_QUESTIONS = 25;
   const [showDetails, setShowDetails] = useState(false);
   const [testStartedAt, setTestStartedAt] = useState(null);
   const [testFinishedAt, setTestFinishedAt] = useState(null);
@@ -41,7 +45,6 @@ const sessionToken = getSessionToken();
 
     return await res.json();
   }
-
   async function startTest() {
     try {
       setLoading(true);
@@ -53,6 +56,7 @@ const sessionToken = getSessionToken();
       setTestFinishedAt(null);
 
       const data = await getNextQuestion();
+      setAnsweredCount(data.answeredCount || 0);
 
       if (data.finished) {
         setResult(data);
@@ -93,6 +97,7 @@ const sessionToken = getSessionToken();
       await answerRes.json();
 
       const nextData = await getNextQuestion();
+      setAnsweredCount(nextData.answeredCount || 0);
       console.log("NEXT DATA AFTER ANSWER:", nextData);
 
       if (nextData.finished) {
@@ -144,7 +149,32 @@ const sessionToken = getSessionToken();
     setResult(null);
     setShowDetails(false);
   }
+  function toggleAudio() {
+  if (!audioRef.current) return;
 
+  if (audioRef.current.paused) {
+    audioRef.current.play();
+    setIsAudioPlaying(true);
+  } else {
+    audioRef.current.pause();
+    setIsAudioPlaying(false);
+  }
+}
+
+function updateAudioProgress() {
+  if (!audioRef.current) return;
+
+  const { currentTime, duration } = audioRef.current;
+
+  if (!duration) return;
+
+  setAudioProgress((currentTime / duration) * 100);
+}
+
+function resetAudioState() {
+  setIsAudioPlaying(false);
+  setAudioProgress(0);
+}
   async function sendResultEmail() {
     try {
       if (!email) {
@@ -325,7 +355,21 @@ const sessionToken = getSessionToken();
         <main className="test-card">
           <div className="test-header">
             <div>
-              <div className="badge">Adaptív teszt</div>
+              <div className="test-banner">
+                Adaptív teszt
+              </div>
+              <div className="question-counter">
+              <span>
+                Megválaszolt kérdések: <strong>{answeredCount}</strong>
+              </span>
+
+              <span>
+                Hátralévő kb.:{" "}
+                <strong>
+                  {Math.max(0, APPROX_TOTAL_QUESTIONS - answeredCount)}
+                </strong>
+              </span>
+            </div>
             </div>
 
             <div className="header-actions">
@@ -374,18 +418,71 @@ const sessionToken = getSessionToken();
   )}
 
   {question.audio_url && (
-    <audio
-      controls
-      className="question-audio"
+  <div className="audio-control-wrapper">
+    <button
+      type="button"
+      className="audio-circle-button"
+      onClick={toggleAudio}
+      style={{
+        background: `conic-gradient(
+          #6f3cff ${audioProgress}%,
+          #e6e0ff ${audioProgress}%
+        )`,
+      }}
     >
-      <source
-        src={question.audio_url}
-        type="audio/ogg"
-      />
-    </audio>
-  )}
+      <span className="audio-inner-circle">
+{isAudioPlaying ? (
+  <svg
+    width="18"
+    height="18"
+    viewBox="0 0 24 24"
+    fill="none"
+  >
+    <rect
+      x="6"
+      y="5"
+      width="3"
+      height="14"
+      rx="1.5"
+      fill="white"
+    />
+    <rect
+      x="15"
+      y="5"
+      width="3"
+      height="14"
+      rx="1.5"
+      fill="white"
+    />
+  </svg>
+) : (
+  <svg
+    width="20"
+    height="20"
+    viewBox="0 0 24 24"
+    fill="white"
+  >
+    <path d="M8 5v14l11-7z" />
+  </svg>
+)}      </span>
+    </button>
 
+    <audio
+      ref={audioRef}
+      src={question.audio_url}
+      onTimeUpdate={updateAudioProgress}
+      onEnded={resetAudioState}
+      onPause={() => setIsAudioPlaying(false)}
+      onPlay={() => setIsAudioPlaying(true)}
+      preload="metadata"
+    />
+  </div>
+)}
+
+  {question.text &&
+ question.text !== question.prompt && (
   <p>{question.text}</p>
+)}
 </div>
 
               <div className="options">
