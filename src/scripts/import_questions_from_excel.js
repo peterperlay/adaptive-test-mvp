@@ -6,25 +6,24 @@ dotenv.config();
 const EXCEL_PATH = "./data/Placement test_Question bank_L1-L9.xlsx";
 
 function mapDifficulty(level) {
+  const normalized = String(level).trim().replace(/^L/i, "");
+
   const map = {
-    L1: -2.5,
-    L2: -2,
-    L3: -1.5,
-    L4: -1,
-    L5: -0.5,
-    L6: 0,
-    L7: 0.5,
-    L8: 1,
-    L9: 1.5,
-    A1: -2,
-    A2: -1,
-    B1: 0,
-    B2: 1,
-    C1: 2,
+    1: -2.5,
+    2: -1.8,
+    3: -1.2,
+    4: -0.6,
+    5: 0,
+    6: 0.6,
+    7: 1.2,
+    8: 1.8,
+    9: 2.5,
   };
 
-  return map[String(level).trim()] ?? 0;
+  return map[normalized] ?? 0;
 }
+
+
 
 function normalizeType(type) {
   const value = String(type || "").toLowerCase().trim();
@@ -54,20 +53,24 @@ function buildAudioUrl(value) {
   return url.startsWith("http") ? url : null;
 }
 function levelToCefr(level) {
+  const normalized = String(level).trim().replace(/^L/i, "");
+
   const map = {
-    L1: "A1",
-    L2: "A1",
-    L3: "A2",
-    L4: "A2",
-    L5: "B1",
-    L6: "B1",
-    L7: "B2",
-    L8: "B2",
-    L9: "C1",
+    1: "1",
+    2: "2",
+    3: "3",
+    4: "4",
+    5: "5",
+    6: "6",
+    7: "7",
+    8: "8",
+    9: "9",
   };
 
-  return map[String(level).trim()] ?? "B1";
+  return map[normalized] ?? "5";
 }
+
+
 
 async function getDifficultyMapFromExistingBank(db) {
   const result = await db.query(`
@@ -131,6 +134,15 @@ worksheet.eachRow((row, rowNumber) => {
 
   console.log(`Found ${rows.length} rows`);
 
+const levelCounts = {};
+
+for (const row of rows) {
+  const level = String(row.Level || "").trim() || "EMPTY";
+  levelCounts[level] = (levelCounts[level] || 0) + 1;
+}
+
+console.log("LEVEL COUNTS FROM EXCEL:", levelCounts);
+
   let insertedCount = 0;
   let skippedCount = 0;
 
@@ -176,16 +188,33 @@ worksheet.eachRow((row, rowNumber) => {
       continue;
     }
 
-    if (!correctAnswer || options.length < 2) {
-      skippedCount++;
-      console.warn("⚠️ Skipping row without valid answers");
-      continue;
-    }
+    if (!correctAnswer || options.length < 2 || options.length > 4) {
+  skippedCount++;
 
-    const questionText =
-     normalizeType(row.Type) === "reading"
-      ? ""
-      : prompt;
+  console.warn(
+    `⚠️ Row ${index + 2}: skipped, invalid option count (${options.length})`
+  );
+
+  continue;
+}
+
+const normalizedCorrectAnswer = correctAnswer.trim().toLowerCase();
+
+const hasCorrectAnswer = options.some(
+  (option) => option.trim().toLowerCase() === normalizedCorrectAnswer
+);
+
+if (!hasCorrectAnswer) {
+  console.warn(
+    `⚠️ Row ${index + 2}: correct answer mismatch, using first option as fallback`
+  );
+}
+
+const questionText =
+  normalizeType(row.Type) === "reading"
+    ? ""
+    : prompt;
+
 
     const questionResult = await db.query(
       `
@@ -224,6 +253,10 @@ worksheet.eachRow((row, rowNumber) => {
 
     let correctOptionId = null;
 
+    if (!hasCorrectAnswer) {
+  correctOptionId = null;
+}
+
     for (const optionText of options) {
       const optionResult = await db.query(
         `
@@ -244,27 +277,20 @@ worksheet.eachRow((row, rowNumber) => {
         correctOptionId = optionResult.rows[0].id;
       }
     }
+      if (!correctOptionId) {
+  const fallbackOption = await db.query(
+    `
+    SELECT id
+    FROM options
+    WHERE question_id = $1
+    ORDER BY id
+    LIMIT 1
+    `,
+    [questionId]
+  );
 
-    if (!correctOptionId) {
-      const correctOptionResult = await db.query(
-        `
-        INSERT INTO options (
-          question_id,
-          text
-        )
-        VALUES ($1,$2)
-        RETURNING id
-        `,
-        [questionId, correctAnswer]
-      );
-
-      correctOptionId = correctOptionResult.rows[0].id;
-
-      console.warn(
-        `⚠️ Correct answer was not in options. Added as extra option for question ${questionId}`
-      );
-    }
-
+  correctOptionId = fallbackOption.rows[0]?.id;
+}
     await db.query(
       `
       UPDATE questions

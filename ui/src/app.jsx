@@ -4,23 +4,18 @@ import "./App.css";
 const API = "http://localhost:3000";
 
 export default function App() {
+  function getSessionToken() {
+    let token = localStorage.getItem("adaptiveTestToken");
 
-function getSessionToken() {
-  let token = localStorage.getItem("adaptiveTestToken");
+    if (!token) {
+      token = crypto.randomUUID();
+      localStorage.setItem("adaptiveTestToken", token);
+    }
 
-  if (!token) {
-    token = crypto.randomUUID();
-
-    localStorage.setItem(
-      "adaptiveTestToken",
-      token
-    );
+    return token;
   }
 
-  return token;
-}
-
-const sessionToken = getSessionToken();
+  const sessionToken = getSessionToken();
 
   const [screen, setScreen] = useState("landing");
   const [question, setQuestion] = useState(null);
@@ -45,6 +40,7 @@ const sessionToken = getSessionToken();
 
     return await res.json();
   }
+
   async function startTest() {
     try {
       setLoading(true);
@@ -90,15 +86,26 @@ const sessionToken = getSessionToken();
         }),
       });
 
-      if (!answerRes.ok) {
-        throw new Error(`Answer API error: ${answerRes.status}`);
-      }
+     if (!answerRes.ok) {
+  if (answerRes.status === 409) {
+    const finalData = await getNextQuestion();
+
+    if (finalData.finished) {
+      setResult(finalData);
+      setQuestion(null);
+      setTestFinishedAt(Date.now());
+      setScreen("result");
+      return;
+    }
+  }
+
+  throw new Error(`Answer API error: ${answerRes.status}`);
+}
 
       await answerRes.json();
 
       const nextData = await getNextQuestion();
       setAnsweredCount(nextData.answeredCount || 0);
-      console.log("NEXT DATA AFTER ANSWER:", nextData);
 
       if (nextData.finished) {
         setResult(nextData);
@@ -120,9 +127,9 @@ const sessionToken = getSessionToken();
     try {
       setLoading(true);
 
- const res = await fetch(`${API}/engine/reset/${sessionToken}`, {
-  method: "POST",
-});
+      const res = await fetch(`${API}/engine/reset/${sessionToken}`, {
+        method: "POST",
+      });
 
       if (!res.ok) {
         throw new Error(`Reset API error: ${res.status}`);
@@ -149,32 +156,34 @@ const sessionToken = getSessionToken();
     setResult(null);
     setShowDetails(false);
   }
+
   function toggleAudio() {
-  if (!audioRef.current) return;
+    if (!audioRef.current) return;
 
-  if (audioRef.current.paused) {
-    audioRef.current.play();
-    setIsAudioPlaying(true);
-  } else {
-    audioRef.current.pause();
-    setIsAudioPlaying(false);
+    if (audioRef.current.paused) {
+      audioRef.current.play();
+      setIsAudioPlaying(true);
+    } else {
+      audioRef.current.pause();
+      setIsAudioPlaying(false);
+    }
   }
-}
 
-function updateAudioProgress() {
-  if (!audioRef.current) return;
+  function updateAudioProgress() {
+    if (!audioRef.current) return;
 
-  const { currentTime, duration } = audioRef.current;
+    const { currentTime, duration } = audioRef.current;
 
-  if (!duration) return;
+    if (!duration) return;
 
-  setAudioProgress((currentTime / duration) * 100);
-}
+    setAudioProgress((currentTime / duration) * 100);
+  }
 
-function resetAudioState() {
-  setIsAudioPlaying(false);
-  setAudioProgress(0);
-}
+  function resetAudioState() {
+    setIsAudioPlaying(false);
+    setAudioProgress(0);
+  }
+
   async function sendResultEmail() {
     try {
       if (!email) {
@@ -212,6 +221,12 @@ function resetAudioState() {
     setResult({
       answeredCount: 20,
       correctCount: 14,
+      stopReason: "Confidence threshold reached",
+      skillCoverage: {
+        grammar: 7,
+        reading: 6,
+        listening: 7,
+      },
       thetaHistory: [
         { questionNumber: 1, thetaAfter: -0.2, isCorrect: true },
         { questionNumber: 2, thetaAfter: 0.05, isCorrect: true },
@@ -236,6 +251,15 @@ function resetAudioState() {
     typeof result?.user?.sem === "number"
       ? Math.max(0, Math.min(100, Math.round((1 - result.user.sem) * 100)))
       : null;
+
+  const confidenceLabel =
+    confidence === null
+      ? "N/A"
+      : confidence >= 75
+      ? "Magas"
+      : confidence >= 55
+      ? "Közepes"
+      : "Alacsony";
 
   const durationMinutes =
     testStartedAt && testFinishedAt
@@ -267,8 +291,7 @@ function resetAudioState() {
         : 40 + (index / (thetaChartData.length - 1)) * 420;
 
     const y =
-      210 -
-      ((Number(point.thetaAfter) - minTheta) / thetaRange) * 160;
+      210 - ((Number(point.thetaAfter) - minTheta) / thetaRange) * 160;
 
     return {
       ...point,
@@ -305,10 +328,37 @@ function resetAudioState() {
       text:
         "A C1 szintű nyelvhasználó magas szinten használja az angolt. Összetett szövegeket is könnyedén értelmez, és rugalmasan, választékosan kommunikál szakmai vagy akadémiai helyzetekben is.",
     },
+    C2: {
+      title: "Mesterfok",
+      text:
+        "A C2 szintű nyelvhasználó szinte minden hallott vagy olvasott szöveget könnyedén megért. Spontán, nagyon folyékonyan és pontosan kommunikál, árnyalt jelentéskülönbségeket is képes kifejezni.",
+    },
   };
 
-  const currentCefr = result?.user?.cefr || "A2";
-  const currentLevel = levelDescriptions[currentCefr] || levelDescriptions.A2;
+  const currentCefr = result?.user?.cefr || "B1";
+const currentLevel = levelDescriptions[currentCefr] || {
+  title: "Becsült szint",
+  text: "A teszt a válaszok alapján becsült nyelvi szintet állapított meg.",
+};
+const cefrPositions = {
+  A1: 0,
+  A2: 20,
+  B1: 40,
+  B2: 60,
+  C1: 80,
+  C2: 100,
+};
+
+const levelMarkerPosition =
+  cefrPositions[currentCefr] ?? 40;
+
+  
+  function formatSkillName(skill) {
+    if (skill === "grammar") return "Grammar";
+    if (skill === "reading") return "Reading";
+    if (skill === "listening") return "Listening";
+    return skill;
+  }
 
   return (
     <div className="app-shell">
@@ -355,21 +405,20 @@ function resetAudioState() {
         <main className="test-card">
           <div className="test-header">
             <div>
-              <div className="test-banner">
-                Adaptív teszt
-              </div>
-              <div className="question-counter">
-              <span>
-                Megválaszolt kérdések: <strong>{answeredCount}</strong>
-              </span>
+              <div className="test-banner">Adaptív teszt</div>
 
-              <span>
-                Hátralévő kb.:{" "}
-                <strong>
-                  {Math.max(0, APPROX_TOTAL_QUESTIONS - answeredCount)}
-                </strong>
-              </span>
-            </div>
+              <div className="question-counter">
+                <span>
+                  Megválaszolt kérdések: <strong>{answeredCount}</strong>
+                </span>
+
+                <span>
+                  Hátralévő kb.:{" "}
+                  <strong>
+                    {Math.max(0, APPROX_TOTAL_QUESTIONS - answeredCount)}
+                  </strong>
+                </span>
+              </div>
             </div>
 
             <div className="header-actions">
@@ -395,95 +444,82 @@ function resetAudioState() {
 
           {!loading && question && (
             <>
-           <div className="question-box">
+              <div className="question-box">
+                {question.prompt && (
+                  <span className="question-instruction">
+                    {question.prompt}
+                  </span>
+                )}
 
-  {question.prompt && (
-    <span className="question-instruction">
-      {question.prompt}
-    </span>
-  )}
+                {question.passage && (
+                  <div className="reading-passage">{question.passage}</div>
+                )}
 
-  {question.passage && (
-    <div className="reading-passage">
-      {question.passage}
-    </div>
-  )}
+                {question.image_url && (
+                  <img
+                    src={question.image_url}
+                    alt="Question visual"
+                    className="question-image"
+                  />
+                )}
 
-  {question.image_url && (
-    <img
-      src={question.image_url}
-      alt="Question visual"
-      className="question-image"
-    />
-  )}
+                {question.audio_url && (
+                  <div className="audio-control-wrapper">
+                    <button
+                      type="button"
+                      className="audio-circle-button"
+                      onClick={toggleAudio}
+                      style={{
+                        background: `conic-gradient(
+                          #6f3cff ${audioProgress}%,
+                          #e6e0ff ${audioProgress}%
+                        )`,
+                      }}
+                    >
+                      <span className="audio-inner-circle">
+                        {isAudioPlaying ? (
+                          <svg width="18" height="18" viewBox="0 0 24 24">
+                            <rect
+                              x="6"
+                              y="5"
+                              width="3"
+                              height="14"
+                              rx="1.5"
+                              fill="white"
+                            />
+                            <rect
+                              x="15"
+                              y="5"
+                              width="3"
+                              height="14"
+                              rx="1.5"
+                              fill="white"
+                            />
+                          </svg>
+                        ) : (
+                          <svg width="20" height="20" viewBox="0 0 24 24">
+                            <path d="M8 5v14l11-7z" fill="white" />
+                          </svg>
+                        )}
+                      </span>
+                    </button>
 
-  {question.audio_url && (
-  <div className="audio-control-wrapper">
-    <button
-      type="button"
-      className="audio-circle-button"
-      onClick={toggleAudio}
-      style={{
-        background: `conic-gradient(
-          #6f3cff ${audioProgress}%,
-          #e6e0ff ${audioProgress}%
-        )`,
-      }}
-    >
-      <span className="audio-inner-circle">
-{isAudioPlaying ? (
-  <svg
-    width="18"
-    height="18"
-    viewBox="0 0 24 24"
-    fill="none"
-  >
-    <rect
-      x="6"
-      y="5"
-      width="3"
-      height="14"
-      rx="1.5"
-      fill="white"
-    />
-    <rect
-      x="15"
-      y="5"
-      width="3"
-      height="14"
-      rx="1.5"
-      fill="white"
-    />
-  </svg>
-) : (
-  <svg
-    width="20"
-    height="20"
-    viewBox="0 0 24 24"
-    fill="white"
-  >
-    <path d="M8 5v14l11-7z" />
-  </svg>
-)}      </span>
-    </button>
+                    <audio
+                      ref={audioRef}
+                      src={question.audio_url}
+                      onTimeUpdate={updateAudioProgress}
+                      onEnded={resetAudioState}
+                      onPause={() => setIsAudioPlaying(false)}
+                      onPlay={() => setIsAudioPlaying(true)}
+                      preload="metadata"
+                    />
+                  </div>
+                )}
 
-    <audio
-      ref={audioRef}
-      src={question.audio_url}
-      onTimeUpdate={updateAudioProgress}
-      onEnded={resetAudioState}
-      onPause={() => setIsAudioPlaying(false)}
-      onPlay={() => setIsAudioPlaying(true)}
-      preload="metadata"
-    />
-  </div>
-)}
-
-  {question.text &&
- question.text !== question.prompt && (
-  <p>{question.text}</p>
-)}
-</div>
+                {question.text && question.text !== question.prompt && (
+                  <p>{question.text}</p>
+                )}
+              </div>
 
               <div className="options">
                 {question.options?.map((option) => (
@@ -567,17 +603,42 @@ function resetAudioState() {
                 <div className="metric-card">
                   <span>Konfidencia</span>
                   <strong>
-                    {confidence !== null ? `${confidence}%` : "N/A"}
+                    {confidence !== null
+                      ? `${confidence}% (${confidenceLabel})`
+                      : "N/A"}
                   </strong>
                 </div>
 
                 <div className="metric-card">
                   <span>Kitöltési idő</span>
                   <strong>
-                    {durationMinutes !== null ? `${durationMinutes} perc` : "N/A"}
+                    {durationMinutes !== null
+                      ? `${durationMinutes} perc`
+                      : "N/A"}
                   </strong>
                 </div>
+
+                <div className="metric-card">
+                  <span>Teszt lezárásának oka</span>
+                  <strong>{result?.stopReason || "N/A"}</strong>
+                </div>
               </div>
+
+              {result?.skillCoverage && (
+                <div className="skill-coverage-box">
+                  <h3>Felmért készségek</h3>
+
+                  <div className="skills-row">
+                    {Object.entries(result.skillCoverage).map(
+                      ([skill, count]) => (
+                        <div key={skill} className="skill-pill">
+                          {formatSkillName(skill)}: {count}
+                        </div>
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="level-strip-card">
                 <div className="theta-chart-header">
@@ -590,19 +651,14 @@ function resetAudioState() {
                   <span>B1</span>
                   <span>B2</span>
                   <span>C1</span>
+                  <span>C2</span>
                 </div>
 
                 <div className="level-strip">
                   <div
                     className="level-marker"
                     style={{
-                      left: `${Math.min(
-                        100,
-                        Math.max(
-                          0,
-                          (((result?.user?.theta ?? 0) + 3) / 6) * 100
-                        )
-                      )}%`,
+                  left: `${levelMarkerPosition}%`,
                     }}
                   />
                 </div>
@@ -617,8 +673,7 @@ function resetAudioState() {
                   {Array.from({ length: 6 }, (_, i) => {
                     const value = minTheta + (thetaRange / 5) * i;
                     const y =
-                      210 -
-                      ((value - minTheta) / thetaRange) * 160;
+                      210 - ((value - minTheta) / thetaRange) * 160;
 
                     return (
                       <g key={value.toFixed(1)}>

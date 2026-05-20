@@ -215,6 +215,30 @@ router.get("/next-question/:token", async (req, res) => {
     const answeredCount = answers.length;
     const correctCount = answers.filter((a) => a.is_correct).length;
 
+    const answeredSkillCounts = {};
+
+for (const answer of answers) {
+  const skill = answer.skill_tag || answer.skill || "general";
+  answeredSkillCounts[skill] = (answeredSkillCounts[skill] || 0) + 1;
+}
+
+const trackedSkills = ["grammar", "reading", "listening"];
+
+for (const skill of trackedSkills) {
+  if (!answeredSkillCounts[skill]) {
+    answeredSkillCounts[skill] = 0;
+  }
+}
+
+const preferredSkill = trackedSkills.reduce((lowest, current) => {
+  return answeredSkillCounts[current] < answeredSkillCounts[lowest]
+    ? current
+    : lowest;
+}, trackedSkills[0]);
+
+console.log("SKILL COUNTS:", answeredSkillCounts);
+console.log("PREFERRED SKILL:", preferredSkill);
+
     const thetaHistory = answers.map((a, index) => ({
       questionNumber: index + 1,
       thetaBefore: Number(a.theta_before),
@@ -295,6 +319,7 @@ router.get("/next-question/:token", async (req, res) => {
         stopReason,
         answeredCount,
         correctCount,
+        skillCoverage: answeredSkillCounts,
         thetaHistory,
         sessionId: session.public_session_id,
 
@@ -308,19 +333,79 @@ router.get("/next-question/:token", async (req, res) => {
         nextQuestion: null,
       });
     }
+ 
 
-    const questionsResult = await db.query(
-      `
-      SELECT q.*
-      FROM questions q
-      LEFT JOIN answers a
-        ON a.question_id = q.id
-       AND a.session_id = $1
-      WHERE a.id IS NULL
-      ORDER BY RANDOM()
-      `,
-      [session.id]
-    );
+  const difficultyWindow = answeredCount < 5 ? 1.0 : 2.5; 
+  const questionsResult = await db.query(
+  `
+  SELECT q.*
+  FROM questions q
+  LEFT JOIN answers a
+    ON a.question_id = q.id
+   AND a.session_id = $1
+  WHERE a.id IS NULL
+    AND (
+      q.skill = $3
+      OR q.skill_tag = $3
+    )
+    AND ABS(q.difficulty - $2) <= $4
+  ORDER BY
+    ABS(q.difficulty - $2),
+    RANDOM()
+  LIMIT 20
+  `,
+  [session.id, session.current_theta, preferredSkill, difficultyWindow]
+);
+
+let candidates = questionsResult.rows;
+
+if (!candidates.length) {
+  console.log(
+    `No questions found for preferred skill: ${preferredSkill}, falling back`
+  );
+
+  const fallbackResult = await db.query(
+    `
+    SELECT q.*
+    FROM questions q
+    LEFT JOIN answers a
+      ON a.question_id = q.id
+     AND a.session_id = $1
+    WHERE a.id IS NULL
+      AND ABS(q.difficulty - $2) <= $3
+    ORDER BY
+      ABS(q.difficulty - $2),
+      RANDOM()
+    LIMIT 20
+    `,
+    [session.id, session.current_theta, difficultyWindow]
+  );
+
+  candidates = fallbackResult.rows;
+}
+
+if (!candidates.length) {
+  await db.query(
+    `
+    UPDATE test_sessions
+    SET status = 'finished',
+        finished_at = COALESCE(finished_at, NOW())
+    WHERE id = $1
+    `,
+    [session.id]
+  );
+
+  return res.json({
+    finished: true,
+    stopReason: "No more questions available",
+  });
+}
+
+const next =
+  candidates[
+    Math.floor(Math.random() * candidates.length)
+  ];
+
 
     if (!questionsResult.rows.length) {
       await db.query(
@@ -349,6 +434,7 @@ router.get("/next-question/:token", async (req, res) => {
         stopReason: "No more questions available for this session",
         answeredCount,
         correctCount,
+        skillCoverage: answeredSkillCounts,
         thetaHistory,
         sessionId: session.public_session_id,
 
@@ -363,18 +449,10 @@ router.get("/next-question/:token", async (req, res) => {
       });
     }
 
-    const answeredSkillCounts = {};
+   
 
-    for (const answer of answers) {
-      const skill = answer.skill_tag || answer.skill || "general";
-      answeredSkillCounts[skill] = (answeredSkillCounts[skill] || 0) + 1;
-    }
-
-    const next = selectNextQuestion(
-      questionsResult.rows,
-      session.current_theta,
-      answeredSkillCounts
-    );
+console.log("SKILL COUNTS:", answeredSkillCounts);
+console.log("PREFERRED SKILL:", preferredSkill);
 
     const optionsResult = await db.query(
       `
@@ -395,6 +473,10 @@ router.get("/next-question/:token", async (req, res) => {
       difficulty: next.difficulty,
       skill: next.skill_tag || next.skill,
       type: next.type,
+      preferredSkill,
+      skillCounts: answeredSkillCounts,
+      usedFallback: !questionsResult.rows.length,
+      candidateCount: candidates.length,
     });
 
     res.json({
@@ -504,12 +586,30 @@ router.post("/answer", async (req, res) => {
     const isCorrect =
       Number(optionId) === Number(question.correct_option_id);
 
-    const newTheta = updateTheta(
-      thetaBefore,
-      Number(question.difficulty),
-      isCorrect
-    );
+    const rawTheta = updateTheta(
+  thetaBefore,
+  Number(question.difficulty),
+  isCorrect
+);
 
+const MAX_STEP = 0.4;
+
+const thetaDelta = rawTheta - thetaBefore;
+
+const clampedDelta = Math.max(
+  -MAX_STEP,
+  Math.min(MAX_STEP, thetaDelta)
+);
+
+const unclampedTheta = thetaBefore + clampedDelta;
+
+const MIN_THETA = -3;
+const MAX_THETA = 3;
+
+const newTheta = Math.max(
+  MIN_THETA,
+  Math.min(MAX_THETA, unclampedTheta)
+);
     if (Number.isNaN(newTheta)) {
       return res.status(500).json({
         error: "Theta calculation failed",
@@ -744,6 +844,140 @@ router.post("/send-result", async (req, res) => {
 
     res.status(500).json({
       error: "Email sending failed",
+      details: err.message,
+    });
+  }
+});
+
+// -----------------------------------------------------
+// EXPORT SESSION RESULT
+// -----------------------------------------------------
+router.get("/export-session/:token", async (req, res) => {
+  try {
+    const db = getPool();
+    const token = req.params.token;
+
+    const sessionResult = await db.query(
+      `
+      SELECT *
+      FROM test_sessions
+      WHERE user_token = $1
+      `,
+      [token]
+    );
+
+    if (!sessionResult.rows.length) {
+      return res.status(404).json({
+        error: "Session not found",
+      });
+    }
+
+    const session = sessionResult.rows[0];
+
+    const answersResult = await db.query(
+      `
+      SELECT
+        a.id AS answer_id,
+        a.question_id,
+        a.option_id,
+        a.is_correct,
+        a.theta_before,
+        a.theta_after,
+        a.cefr_after,
+        a.created_at,
+        q.skill,
+        q.skill_tag,
+        q.type,
+        q.difficulty,
+        q.cefr_level,
+        q.correct_option_id
+      FROM answers a
+      JOIN questions q
+        ON q.id = a.question_id
+      WHERE a.session_id = $1
+      ORDER BY a.created_at ASC
+      `,
+      [session.id]
+    );
+
+    const answers = answersResult.rows;
+
+    const skillCoverage = {};
+
+    for (const answer of answers) {
+      const skill = answer.skill || answer.skill_tag || "general";
+      skillCoverage[skill] = (skillCoverage[skill] || 0) + 1;
+    }
+
+    const correctCount = answers.filter((answer) => answer.is_correct).length;
+
+    const thetaHistory = answers.map((answer, index) => ({
+      questionNumber: index + 1,
+      questionId: answer.question_id,
+      thetaBefore: Number(answer.theta_before),
+      thetaAfter: Number(answer.theta_after),
+      isCorrect: answer.is_correct,
+      skill: answer.skill || answer.skill_tag,
+      difficulty: Number(answer.difficulty),
+      cefrAfter: answer.cefr_after,
+      answeredAt: answer.created_at,
+    }));
+
+    const sem = standardError(session.current_theta, answers);
+    const ci95 = confidenceInterval(session.current_theta, sem);
+
+    res.json({
+      session: {
+  id: session.public_session_id,
+  userId: session.public_user_id,
+  status: session.status,
+  startedAt: session.started_at,
+  finishedAt: session.finished_at,
+
+  finalTheta: session.current_theta,
+  finalCefr: session.cefr_estimate,
+
+  answeredCount: answers.length,
+  correctCount,
+
+  accuracy:
+    answers.length > 0
+      ? Number(
+          (
+            (correctCount / answers.length) * 100
+          ).toFixed(1)
+        )
+      : 0,
+
+  sem,
+  ci95,
+
+  stopReason: session.stop_reason,
+
+  skillCoverage,
+},
+      answers: answers.map((answer, index) => ({
+        number: index + 1,
+        questionId: answer.question_id,
+        selectedOptionId: answer.option_id,
+        correctOptionId: answer.correct_option_id,
+        isCorrect: answer.is_correct,
+        thetaBefore: answer.theta_before,
+        thetaAfter: answer.theta_after,
+        cefrAfter: answer.cefr_after,
+        skill: answer.skill || answer.skill_tag,
+        type: answer.type,
+        difficulty: answer.difficulty,
+        cefrLevel: answer.cefr_level,
+        answeredAt: answer.created_at,
+      })),
+      thetaHistory,
+    });
+  } catch (err) {
+    console.error("EXPORT SESSION ERROR:", err);
+
+    res.status(500).json({
+      error: "Export failed",
       details: err.message,
     });
   }
